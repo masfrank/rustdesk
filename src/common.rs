@@ -1014,7 +1014,9 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    // Custom API server from environment variable
+    // This must be set at build time, otherwise compilation will fail
+    env!("CUSTOM_API_SERVER").to_owned()
 }
 
 #[inline]

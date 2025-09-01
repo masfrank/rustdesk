@@ -1266,7 +1266,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                           r'^([0-9]|[1-9]\d|[1-9]\d{2}|[1-9]\d{3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$')),
                     ],
                     decoration: const InputDecoration(
-                      hintText: '21118',
+                      hintText: '31268',
                       contentPadding:
                           EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                     ),
@@ -1737,9 +1737,9 @@ class _DisplayState extends State<_Display> {
   }
 
   Widget trackpadSpeed(BuildContext context) {
-    final initSpeed = (int.tryParse(
-            bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
-        kDefaultTrackpadSpeed);
+    final initSpeed =
+        (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
+            kDefaultTrackpadSpeed);
     final curSpeed = SimpleWrapper(initSpeed);
     void onDebouncer(int v) {
       bind.mainSetUserDefaultOption(

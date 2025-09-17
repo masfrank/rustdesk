@@ -1,13 +1,16 @@
-use super::{server::EVENT_PROXY, Cursor, CustomEvent};
+use super::{server::EVENT_PROXY, Cursor, CustomEvent, Ripple};
 use core_graphics::context::CGContextRef;
 use foreign_types::ForeignTypeRef;
 use hbb_common::{bail, log, ResultType};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
-use piet::{kurbo::BezPath, RenderContext};
-use piet_coregraphics::CoreGraphicsContext;
+use piet::{
+    kurbo::{BezPath, Point},
+    FontFamily, RenderContext, Text, TextLayout, TextLayoutBuilder,
+};
+use piet_coregraphics::{CoreGraphicsContext, CoreGraphicsTextLayout};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tao::{
-    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition},
     event::{Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
     platform::macos::MonitorHandleExtMacOS,
@@ -16,6 +19,8 @@ use tao::{
 };
 
 const MAXIMUM_WINDOW_LEVEL: i64 = 2147483647;
+const CURSOR_TEXT_FONT_SIZE: f64 = 14.0;
+const CURSOR_TEXT_OFFSET: f64 = 20.0;
 
 struct WindowState {
     window: Arc<Window>,
@@ -25,10 +30,10 @@ struct WindowState {
     display_origin: (f64, f64),
 }
 
-struct Ripple {
-    x: f64,
-    y: f64,
-    start_time: Instant,
+struct CursorInfo {
+    window_id: WindowId,
+    text_key: (String, u32),
+    cursor: Cursor,
 }
 
 fn set_window_properties(window: &Arc<Window>) -> ResultType<()> {
@@ -108,7 +113,8 @@ fn draw_cursors(
     windows: &Vec<WindowState>,
     window_id: WindowId,
     window_ripples: &mut HashMap<WindowId, Vec<Ripple>>,
-    last_cursors: &HashMap<String, (WindowId, Cursor)>,
+    last_cursors: &HashMap<String, CursorInfo>,
+    map_cursor_text: &mut HashMap<(String, u32), CoreGraphicsTextLayout>,
 ) {
     for window in windows.iter() {
         if window.window.id() != window_id {
@@ -135,29 +141,21 @@ fn draw_cursors(
                             context.clear(None, piet::Color::TRANSPARENT);
 
                             if let Some(ripples) = window_ripples.get_mut(&window_id) {
-                                let ripple_duration = std::time::Duration::from_millis(500);
-                                ripples.retain_mut(|ripple| {
-                                    let elapsed = ripple.start_time.elapsed();
-                                    let progress =
-                                        elapsed.as_secs_f64() / ripple_duration.as_secs_f64();
-                                    let radius = 25.0 * progress;
-                                    let alpha = 1.0 - progress;
-                                    if alpha > 0.0 {
-                                        let color = piet::Color::rgba(1.0, 0.5, 0.5, alpha);
-                                        let circle =
-                                            piet::kurbo::Circle::new((ripple.x, ripple.y), radius);
-                                        context.stroke(circle, &color, 2.0);
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                });
+                                Ripple::retain_active(ripples);
+                                for ripple in ripples.iter() {
+                                    let (radius, alpha) = ripple.get_radius_alpha();
+                                    let color = piet::Color::rgba(1.0, 0.25, 0.25, alpha * 0.5);
+                                    let circle =
+                                        piet::kurbo::Circle::new((ripple.x, ripple.y), radius);
+                                    context.stroke(circle, &color, 2.0);
+                                }
                             }
 
-                            for (wid, cursor) in last_cursors.values() {
-                                if *wid != window.window.id() {
+                            for info in last_cursors.values() {
+                                if info.window_id != window.window.id() {
                                     continue;
                                 }
+                                let cursor = &info.cursor;
 
                                 let (x, y) = (cursor.x as f64, cursor.y as f64);
                                 let size = 1.0;
@@ -171,13 +169,38 @@ fn draw_cursors(
                                 pb.line_to((x + 6.0 * size, y + 12.0 * size));
                                 pb.line_to((x + 11.0 * size, y + 12.0 * size));
 
-                                let color = piet::Color::rgba8(
-                                    (cursor.argb >> 16 & 0xFF) as u8,
-                                    (cursor.argb >> 8 & 0xFF) as u8,
-                                    (cursor.argb & 0xFF) as u8,
-                                    (cursor.argb >> 24 & 0xFF) as u8,
-                                );
+                                let rgba = super::argb_to_rgba(cursor.argb);
+                                let color = piet::Color::rgba8(rgba.0, rgba.1, rgba.2, rgba.3);
                                 context.fill(pb, &color);
+
+                                let pos =
+                                    (x + CURSOR_TEXT_OFFSET * size, y + CURSOR_TEXT_OFFSET * size);
+                                let get_rounded_rect = |layout: &CoreGraphicsTextLayout| {
+                                    let text_pos = Point::new(pos.0, pos.1);
+                                    let padded_bounds = (layout.image_bounds()
+                                        + text_pos.to_vec2())
+                                    .inflate(3.0, 3.0);
+                                    padded_bounds.to_rounded_rect(5.0)
+                                };
+
+                                if let Some(layout) = map_cursor_text.get(&info.text_key) {
+                                    context.fill(get_rounded_rect(layout), &piet::Color::WHITE);
+                                    context.draw_text(layout, pos);
+                                } else {
+                                    let text = context.text();
+                                    let color = piet::Color::rgba8(0, 0, 0, 255);
+                                    if let Ok(layout) = text
+                                        .new_text_layout(cursor.text.clone())
+                                        .font(FontFamily::SYSTEM_UI, CURSOR_TEXT_FONT_SIZE)
+                                        .text_color(color)
+                                        .build()
+                                    {
+                                        context
+                                            .fill(get_rounded_rect(&layout), &piet::Color::WHITE);
+                                        context.draw_text(&layout, pos);
+                                        map_cursor_text.insert(info.text_key.clone(), layout);
+                                    }
+                                }
                             }
                             if let Err(e) = context.finish() {
                                 log::error!("Failed to draw cursor: {}", e);
@@ -209,7 +232,8 @@ pub(super) fn create_event_loop() -> ResultType<()> {
     };
 
     let mut window_ripples: HashMap<WindowId, Vec<Ripple>> = HashMap::new();
-    let mut last_cursors: HashMap<String, (WindowId, Cursor)> = HashMap::new();
+    let mut last_cursors: HashMap<String, CursorInfo> = HashMap::new();
+    let mut map_cursor_text: HashMap<(String, u32), CoreGraphicsTextLayout> = HashMap::new();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -229,7 +253,13 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                 _ => {}
             },
             Event::RedrawRequested(window_id) => {
-                draw_cursors(&windows, window_id, &mut window_ripples, &last_cursors);
+                draw_cursors(
+                    &windows,
+                    window_id,
+                    &mut window_ripples,
+                    &last_cursors,
+                    &mut map_cursor_text,
+                );
             }
             Event::MainEventsCleared => {
                 for window in windows.iter() {
@@ -268,14 +298,15 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                         }
                         last_cursors.insert(
                             k,
-                            (
-                                window.window.id(),
-                                Cursor {
+                            CursorInfo {
+                                window_id: window.window.id(),
+                                text_key: (cursor.text.clone(), cursor.argb),
+                                cursor: Cursor {
                                     x: (cursor.x - window.display_origin.0 as f32),
                                     y: (cursor.y - window.display_origin.1 as f32),
                                     ..cursor
                                 },
-                            ),
+                            },
                         );
                         window.window.request_redraw();
                         break;
